@@ -4,11 +4,14 @@ import asyncio
 import os
 from collections import Counter
 from motor.motor_asyncio import AsyncIOMotorClient
-from sanic import Sanic, response
+from sanic import Sanic, response, exceptions
 
 app = Sanic("exporter")
 
 MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017/default")
+PROMETHEUS_BEARER_TOKEN = os.getenv("PROMETHEUS_BEARER_TOKEN")
+if not PROMETHEUS_BEARER_TOKEN:
+    raise ValueError("No PROMETHEUS_BEARER_TOKEN specified")
 
 
 @app.listener("before_server_start")
@@ -68,6 +71,8 @@ async def openvpn_stats(port, service):
 
 @app.route("/metrics")
 async def view_export(request):
+    if request.token != PROMETHEUS_BEARER_TOKEN:
+        raise exceptions.Forbidden("Invalid bearer token")
     coll = app.ctx.db["certidude_certificates"]
 
     async def streaming_fn(response):
