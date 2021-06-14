@@ -1,32 +1,28 @@
 #!/usr/bin/env python
 
+import aiohttp
 import asyncio
 import os
+import re
 from collections import Counter
-from motor.motor_asyncio import AsyncIOMotorClient
 from sanic import Sanic, response, exceptions
 
 app = Sanic("exporter")
 
-MONGO_URI = os.getenv("MONGO_URI", "mongodb://127.0.0.1:27017/default")
+PREFIX = "pinecrypt_gateway_"
 PROMETHEUS_BEARER_TOKEN = os.getenv("PROMETHEUS_BEARER_TOKEN")
 if not PROMETHEUS_BEARER_TOKEN:
     raise ValueError("No PROMETHEUS_BEARER_TOKEN specified")
 
 
-@app.listener("before_server_start")
-async def setup_db(app, loop):
-    app.ctx.db = AsyncIOMotorClient(MONGO_URI).get_default_database()
-
-
-async def wrap(i, prefix="pinecrypt_gateway_"):
+async def wrap(i):
     metrics_seen = set()
     async for name, tp, value, labels in i:
         if name not in metrics_seen:
-            yield "# TYPE %s %s" % (name, tp)
+            yield "# TYPE %s %s" % (PREFIX + name, tp)
             metrics_seen.add(name)
         yield "%s%s %d" % (
-            prefix + name,
+            PREFIX + name,
             ("{%s}" % ",".join(["%s=\"%s\"" % j for j in labels.items()]) if labels else ""),
             value)
 
@@ -73,12 +69,19 @@ async def openvpn_stats(port, service):
 async def view_export(request):
     if request.token != PROMETHEUS_BEARER_TOKEN:
         raise exceptions.Forbidden("Invalid bearer token")
-    coll = app.ctx.db["certidude_certificates"]
 
     async def streaming_fn(response):
         for i in exporter_stats(), openvpn_stats(7505, "openvpn-udp"), openvpn_stats(7506, "openvpn-tcp"):
             async for line in wrap(i):
                 await response.write(line + "\n")
+
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=5)) as session:
+            for port in (4001, 5001, 8001, 9001):
+                async with session.get("http://127.0.0.1:%d/metrics" % port) as upstream_response:
+                    async for line in upstream_response.content:
+                        if not re.match("(# (HELP|TYPE) )?(pinecrypt|goredns)_", line.decode("ascii")):
+                            continue
+                        await response.write(line)
 
     return response.stream(streaming_fn, content_type="text/plain")
 
